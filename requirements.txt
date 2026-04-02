@@ -1,3 +1,5 @@
 cvxpy
 statsmodels
 ecos
+fastapi
+uvicorn

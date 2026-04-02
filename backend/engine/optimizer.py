@@ -8,6 +8,24 @@ import pandas as pd
 from scipy.optimize import minimize
 
 
+def _matrix_errstate():
+    return np.errstate(divide="ignore", over="ignore", invalid="ignore")
+
+
+def _prepare_sigma(Sigma: np.ndarray) -> np.ndarray:
+    """Regularize covariance when condition number is extremely large."""
+    Sigma = np.asarray(Sigma, dtype=float).copy()
+    with _matrix_errstate():
+        cond = float(np.linalg.cond(Sigma))
+    if cond > 1e10:
+        n = Sigma.shape[0]
+        print(
+            f"WARNING: ill-conditioned covariance matrix (cond={cond:.2e}), applying regularization."
+        )
+        Sigma = Sigma + 1e-6 * np.eye(n)
+    return Sigma
+
+
 def _warn_failure(name: str, err: BaseException) -> None:
     print(f"WARNING: {name} failed: {err}")
 
@@ -35,10 +53,11 @@ def _portfolio_metrics(
     w = _clean_weights(w)
     if w is None:
         raise ValueError("weights sum to zero after cleanup")
-    port_ret = float(w @ mu_arr)
-    port_var = float(w @ Sigma @ w)
-    vol = float(np.sqrt(max(port_var, 0.0)))
-    sharpe = (port_ret - rf) / vol if vol > 1e-12 else float("nan")
+    with _matrix_errstate():
+        port_ret = float(w @ mu_arr)
+        port_var = float(w @ Sigma @ w)
+        vol = float(np.sqrt(max(port_var, 0.0)))
+        sharpe = (port_ret - rf) / vol if vol > 1e-12 else float("nan")
     return w, port_ret, vol, float(sharpe)
 
 
@@ -97,7 +116,7 @@ def min_variance(
 ) -> dict | None:
     """Minimum variance portfolio; Sharpe uses rf=0."""
     mu_arr, labels = _align_mu(mu, cov)
-    Sigma = cov.to_numpy(dtype=float)
+    Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     try:
         w = _solve_min_variance_weights(Sigma, allow_short)
     except Exception as e:
@@ -116,15 +135,16 @@ def max_sharpe(
 ) -> dict | None:
     """Maximize Sharpe via minimizing its negative (scipy SLSQP)."""
     mu_arr, labels = _align_mu(mu, cov)
-    Sigma = cov.to_numpy(dtype=float)
+    Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     n = len(mu_arr)
 
     def neg_sharpe(w: np.ndarray) -> float:
         w = np.asarray(w, dtype=float)
-        ex = float(w @ mu_arr - rf)
-        var = float(w @ Sigma @ w)
-        den = np.sqrt(max(var, 1e-12))
-        return -(ex / den)
+        with _matrix_errstate():
+            ex = float(w @ mu_arr - rf)
+            var = float(w @ Sigma @ w)
+            den = np.sqrt(max(var, 1e-12))
+            return -(ex / den)
 
     x0 = np.full(n, 1.0 / n)
     if not allow_short:
@@ -160,19 +180,26 @@ def efficient_frontier(
     cov: pd.DataFrame,
     n_points: int = 50,
     allow_short: bool = False,
+    min_target_return: float | None = None,
 ) -> pd.DataFrame:
     """Minimum variance at each target expected return; skip infeasible targets."""
     mu_arr, labels = _align_mu(mu, cov)
-    Sigma = cov.to_numpy(dtype=float)
+    Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     n = len(mu_arr)
 
     w_mv = _solve_min_variance_weights(Sigma, allow_short)
     if w_mv is None:
         return pd.DataFrame()
 
-    r_mv = float(mu_arr @ w_mv)
-    r_max = float(mu_arr.max())
-    targets = np.linspace(r_mv, r_max, n_points)
+    with _matrix_errstate():
+        r_mv = float(mu_arr @ w_mv)
+        r_max = float(mu_arr.max())
+    lo = r_mv
+    if min_target_return is not None:
+        lo = max(r_mv, float(min_target_return))
+    if lo > r_max + 1e-12:
+        return pd.DataFrame()
+    targets = np.linspace(lo, r_max, n_points)
 
     rows: list[dict] = []
     for target_return in targets:
@@ -200,10 +227,11 @@ def efficient_frontier(
         wc = _clean_weights(wv)
         if wc is None:
             continue
-        port_var = float(wc @ Sigma @ wc)
-        vol = float(np.sqrt(max(port_var, 0.0)))
-        pret = float(wc @ mu_arr)
-        sharpe = (pret - 0.0) / vol if vol > 1e-12 else float("nan")
+        with _matrix_errstate():
+            port_var = float(wc @ Sigma @ wc)
+            vol = float(np.sqrt(max(port_var, 0.0)))
+            pret = float(wc @ mu_arr)
+            sharpe = (pret - 0.0) / vol if vol > 1e-12 else float("nan")
         row = {
             "return": pret,
             "volatility": vol,
@@ -220,12 +248,13 @@ def efficient_frontier(
 
 def _risk_parity_objective(w: np.ndarray, Sigma: np.ndarray) -> float:
     w = np.asarray(w, dtype=float)
-    Sw = Sigma @ w
-    port_var = float(w @ Sw)
-    port_var = max(port_var, 1e-12)
-    rc = w * Sw / port_var
-    target = 1.0 / len(w)
-    return float(np.sum((rc - target) ** 2))
+    with _matrix_errstate():
+        Sw = Sigma @ w
+        port_var = float(w @ Sw)
+        port_var = max(port_var, 1e-12)
+        rc = w * Sw / port_var
+        target = 1.0 / len(w)
+        return float(np.sum((rc - target) ** 2))
 
 
 def risk_parity(
@@ -234,7 +263,7 @@ def risk_parity(
 ) -> dict | None:
     """Equal risk contributions; optional mu for return and Sharpe (rf=0)."""
     labels = list(cov.columns)
-    Sigma = cov.to_numpy(dtype=float)
+    Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     n = Sigma.shape[0]
     x0 = np.full(n, 1.0 / n)
     x0 = np.clip(x0, 0.01, 1.0)
@@ -268,8 +297,9 @@ def risk_parity(
         _warn_failure("risk_parity", RuntimeError("weights invalid after cleanup"))
         return None
 
-    port_var = float(w @ Sigma @ w)
-    vol = float(np.sqrt(max(port_var, 0.0)))
+    with _matrix_errstate():
+        port_var = float(w @ Sigma @ w)
+        vol = float(np.sqrt(max(port_var, 0.0)))
 
     out: dict = {
         "weights": pd.Series(w, index=labels),
@@ -282,8 +312,9 @@ def risk_parity(
         return out
 
     mu_arr, _ = _align_mu(mu, cov)
-    pret = float(w @ mu_arr)
-    sharpe = (pret - 0.0) / vol if vol > 1e-12 else float("nan")
+    with _matrix_errstate():
+        pret = float(w @ mu_arr)
+        sharpe = (pret - 0.0) / vol if vol > 1e-12 else float("nan")
     out["return"] = pret
     out["sharpe"] = float(sharpe)
     return out
