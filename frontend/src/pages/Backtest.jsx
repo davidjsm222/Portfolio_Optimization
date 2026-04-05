@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { buildBacktestStreamUrl, getRegimes } from '../api/backtest.js'
+import JSZip from 'jszip'
+import { buildBacktestStreamUrl, getRegimes, optimizeThreshold } from '../api/backtest.js'
 import { PLOTLY_AXIS, PLOTLY_BASE } from '../chartTheme.js'
 import { SP100_TICKERS, SP50_TICKERS } from '../data/universeTickers.js'
+import { buildCsvString, downloadCSV } from '../utils/csv.js'
 import './Optimizer.css'
 import './Backtest.css'
 
@@ -43,6 +45,8 @@ const SURFACE_COLORSCALE = [
   [0.5, '#080808'],
   [1.0, '#4caf7d'],
 ]
+
+const THRESHOLD_SWEEP_DEFAULTS = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
 
 function methodLabel(id) {
   const m = {
@@ -126,6 +130,69 @@ function computeRegimeBests(rows) {
   }
 }
 
+function backtestExportSlug(metadata) {
+  const start = metadata?.start != null ? String(metadata.start) : 'start'
+  const end = metadata?.end != null ? String(metadata.end) : 'end'
+  return `${start}_${end}`
+}
+
+function buildEquityExportRows(result) {
+  const curves = result?.equity_curves
+  if (!curves || typeof curves !== 'object') return []
+  const dates = new Set()
+  for (const key of EQUITY_ORDER) {
+    const series = curves[key]
+    if (!Array.isArray(series)) continue
+    for (const p of series) {
+      if (p?.date) dates.add(p.date)
+    }
+  }
+  const sortedDates = [...dates].sort()
+  const maps = {}
+  for (const key of EQUITY_ORDER) {
+    const series = curves[key]
+    maps[key] = new Map(
+      Array.isArray(series) ? series.map((p) => [p.date, Number(p.value)]) : [],
+    )
+  }
+  return sortedDates.map((date) => {
+    const row = { date }
+    for (const key of EQUITY_ORDER) {
+      const v = maps[key].get(date)
+      row[key] = v != null && Number.isFinite(v) ? Number(v.toFixed(2)) : ''
+    }
+    return row
+  })
+}
+
+function buildSummaryExportRows(summaryRows) {
+  return summaryRows.map((r) => ({
+    method: r.method,
+    ann_return: r.ann_return,
+    volatility: r.ann_vol,
+    sharpe: r.sharpe,
+    max_drawdown: r.max_drawdown,
+    calm_drawdown: r.calm_drawdown,
+    calmar: r.calmar,
+    n_rebalances: r.n_rebalances,
+  }))
+}
+
+function buildShrinkageExportRows(result) {
+  const s = result?.shrinkage
+  if (!Array.isArray(s)) return []
+  return s.map((p) => ({ date: p.date, alpha: p.alpha }))
+}
+
+function buildRegimeExportRows(regimePerfRows) {
+  return regimePerfRows.map((r) => ({
+    regime: r.regime,
+    method: r.method,
+    sharpe: r.sharpe,
+    max_drawdown: r.max_drawdown,
+  }))
+}
+
 function highestAvgWeightTickerMaxSharpe(weightsHistory) {
   const byTicker = weightsHistory?.max_sharpe
   if (!byTicker || typeof byTicker !== 'object') return ''
@@ -204,6 +271,12 @@ export default function Backtest() {
   const [progressLog, setProgressLog] = useState([])
   const [elapsedSec, setElapsedSec] = useState(0)
   const eventSourceRef = useRef(null)
+  const [trainEndDate, setTrainEndDate] = useState('2019-12-31')
+  const [thresholdOptimizeFor, setThresholdOptimizeFor] = useState('sharpe')
+  const [thresholdOptLoading, setThresholdOptLoading] = useState(false)
+  const [thresholdOptError, setThresholdOptError] = useState(null)
+  const [thresholdOptResult, setThresholdOptResult] = useState(null)
+  const [thresholdOptProgressIx, setThresholdOptProgressIx] = useState(0)
 
   useEffect(() => {
     import('react-plotly.js').then((m) => {
@@ -238,6 +311,19 @@ export default function Backtest() {
     }, 1000)
     return () => clearInterval(id)
   }, [loading])
+
+  useEffect(() => {
+    if (!thresholdOptLoading) {
+      setThresholdOptProgressIx(0)
+      return undefined
+    }
+    setThresholdOptProgressIx(0)
+    const n = THRESHOLD_SWEEP_DEFAULTS.length
+    const id = setInterval(() => {
+      setThresholdOptProgressIx((i) => Math.min(i + 1, n - 1))
+    }, 135000)
+    return () => clearInterval(id)
+  }, [thresholdOptLoading])
 
   useEffect(() => {
     if (!result?.weights_history) return
@@ -340,9 +426,18 @@ export default function Backtest() {
       } else if (msg.type === 'complete') {
         es.close()
         eventSourceRef.current = null
-        setResult(msg.result)
+        const nextResult = msg.result
+        setResult(nextResult)
         setLoading(false)
         setStreamProgress(null)
+        const shrink = nextResult?.shrinkage
+        if (Array.isArray(shrink) && shrink.length > 0) {
+          const sum = shrink.reduce((s, row) => s + Number(row?.alpha ?? 0), 0)
+          const mean = sum / shrink.length
+          if (typeof sessionStorage !== 'undefined' && Number.isFinite(mean)) {
+            sessionStorage.setItem('machalpha_backtest_shrinkage_mean', String(mean))
+          }
+        }
       } else if (msg.type === 'error') {
         es.close()
         eventSourceRef.current = null
@@ -744,6 +839,163 @@ export default function Backtest() {
     })
   }, [regimeDefs, regimePerfRows])
 
+  const exportSlug = useMemo(() => backtestExportSlug(result?.metadata), [result])
+
+  const exportEquityCsv = useCallback(() => {
+    if (!result) return
+    downloadCSV(`machalpha_equity_curves_${exportSlug}.csv`, buildEquityExportRows(result))
+  }, [result, exportSlug])
+
+  const exportSummaryCsv = useCallback(() => {
+    if (!result) return
+    downloadCSV(
+      `machalpha_performance_summary_${exportSlug}.csv`,
+      buildSummaryExportRows(summaryRows),
+    )
+  }, [result, exportSlug, summaryRows])
+
+  const exportShrinkageCsv = useCallback(() => {
+    if (!result) return
+    downloadCSV(
+      `machalpha_shrinkage_series_${exportSlug}.csv`,
+      buildShrinkageExportRows(result),
+    )
+  }, [result, exportSlug])
+
+  const exportRegimeCsv = useCallback(() => {
+    if (!result) return
+    downloadCSV(
+      `machalpha_regime_performance_${exportSlug}.csv`,
+      buildRegimeExportRows(regimePerfRows),
+    )
+  }, [result, exportSlug, regimePerfRows])
+
+  const exportAllZip = useCallback(async () => {
+    if (!result) return
+    const slug = backtestExportSlug(result.metadata)
+    const zip = new JSZip()
+    zip.file(
+      `machalpha_equity_curves_${slug}.csv`,
+      buildCsvString(buildEquityExportRows(result)),
+    )
+    zip.file(
+      `machalpha_performance_summary_${slug}.csv`,
+      buildCsvString(buildSummaryExportRows(summaryRows)),
+    )
+    zip.file(
+      `machalpha_shrinkage_series_${slug}.csv`,
+      buildCsvString(buildShrinkageExportRows(result)),
+    )
+    zip.file(
+      `machalpha_regime_performance_${slug}.csv`,
+      buildCsvString(buildRegimeExportRows(regimePerfRows)),
+    )
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `machalpha_backtest_${slug}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [result, summaryRows, regimePerfRows])
+
+  const runThresholdOptimization = useCallback(async () => {
+    setThresholdOptError(null)
+    setThresholdOptResult(null)
+    setThresholdOptLoading(true)
+    try {
+      const { data } = await optimizeThreshold({
+        tickers,
+        start: startDate,
+        end: endDate,
+        train_end: trainEndDate,
+        estimation_window: estimationWindow,
+        signal_blend: signalBlend,
+        starting_capital: startingCapital,
+        thresholds: THRESHOLD_SWEEP_DEFAULTS,
+        optimize_for: thresholdOptimizeFor,
+      })
+      setThresholdOptResult(data)
+    } catch (err) {
+      const d = err.response?.data?.detail
+      const msg =
+        typeof d === 'string'
+          ? d
+          : Array.isArray(d)
+            ? d.map((x) => (x?.msg != null ? String(x.msg) : String(x))).join('; ')
+            : d != null
+              ? JSON.stringify(d)
+              : err.message || 'Threshold optimization failed'
+      setThresholdOptError(msg)
+    } finally {
+      setThresholdOptLoading(false)
+    }
+  }, [
+    tickers,
+    startDate,
+    endDate,
+    trainEndDate,
+    estimationWindow,
+    signalBlend,
+    startingCapital,
+    thresholdOptimizeFor,
+  ])
+
+  const thresholdOptChartConfig = useMemo(() => {
+    const rows = thresholdOptResult?.results
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { data: [], layout: {} }
+    }
+    const x = rows.map((r) => r.threshold)
+    return {
+      data: [
+        {
+          type: 'scatter',
+          mode: 'lines+markers',
+          name: 'Train Sharpe',
+          x,
+          y: rows.map((r) => numOrNull(r.train_sharpe)),
+          line: { color: '#888888', width: 1.5 },
+          marker: { size: 6, color: '#888888' },
+          hovertemplate: '%{x}%<br>Train Sharpe: %{y:.4f}<extra></extra>',
+        },
+        {
+          type: 'scatter',
+          mode: 'lines+markers',
+          name: 'Validation Sharpe',
+          x,
+          y: rows.map((r) => numOrNull(r.val_sharpe)),
+          line: { color: '#f0ece4', width: 1.5 },
+          marker: { size: 6, color: '#f0ece4' },
+          hovertemplate: '%{x}%<br>Val Sharpe: %{y:.4f}<extra></extra>',
+        },
+      ],
+      layout: {
+        ...PLOTLY_BASE,
+        height: 280,
+        showlegend: true,
+        legend: {
+          font: { family: 'IBM Plex Mono, monospace', size: 9, color: '#666' },
+          bgcolor: 'transparent',
+        },
+        xaxis: {
+          title: { text: 'Drift threshold %', font: { ...PLOTLY_AXIS.titlefont } },
+          gridcolor: '#1a1a1a',
+          zerolinecolor: PLOTLY_AXIS.zerolinecolor,
+          tickfont: { ...PLOTLY_AXIS.tickfont },
+          color: PLOTLY_AXIS.color,
+        },
+        yaxis: {
+          title: { text: 'Sharpe ratio', font: { ...PLOTLY_AXIS.titlefont } },
+          gridcolor: '#1a1a1a',
+          zerolinecolor: PLOTLY_AXIS.zerolinecolor,
+          tickfont: { ...PLOTLY_AXIS.tickfont },
+          color: PLOTLY_AXIS.color,
+        },
+      },
+    }
+  }, [thresholdOptResult])
+
   const loadingDetail = useMemo(() => {
     const universeLabel =
       universeMode === 'Custom'
@@ -970,6 +1222,83 @@ export default function Backtest() {
           )}
 
           {error && <div className="optimizer__error">{error}</div>}
+
+          <div className="optimizer__section backtest__threshold-controls">
+            <div className="optimizer__label">THRESHOLD OPTIMIZATION</div>
+            <div className="backtest__threshold-train-row">
+              <label className="backtest__threshold-mini-label" htmlFor="backtest-train-end">
+                TRAIN ENDS
+              </label>
+              <input
+                id="backtest-train-end"
+                className="optimizer__date-input"
+                type="date"
+                value={trainEndDate}
+                onChange={(e) => setTrainEndDate(e.target.value)}
+                disabled={thresholdOptLoading}
+              />
+            </div>
+            <div className="optimizer__label" style={{ marginTop: '10px' }}>
+              Optimize for
+            </div>
+            <div className="backtest__threshold-opt-grid">
+              <button
+                type="button"
+                className={
+                  thresholdOptimizeFor === 'sharpe'
+                    ? 'optimizer__method-btn optimizer__method-btn--active'
+                    : 'optimizer__method-btn'
+                }
+                disabled={thresholdOptLoading}
+                onClick={() => setThresholdOptimizeFor('sharpe')}
+              >
+                Sharpe
+              </button>
+              <button
+                type="button"
+                className={
+                  thresholdOptimizeFor === 'calmar'
+                    ? 'optimizer__method-btn optimizer__method-btn--active'
+                    : 'optimizer__method-btn'
+                }
+                disabled={thresholdOptLoading}
+                onClick={() => setThresholdOptimizeFor('calmar')}
+              >
+                Calmar
+              </button>
+              <button
+                type="button"
+                className={
+                  thresholdOptimizeFor === 'max_drawdown'
+                    ? 'optimizer__method-btn optimizer__method-btn--active'
+                    : 'optimizer__method-btn'
+                }
+                disabled={thresholdOptLoading}
+                onClick={() => setThresholdOptimizeFor('max_drawdown')}
+              >
+                Min DD
+              </button>
+            </div>
+            <button
+              type="button"
+              className="optimizer__run"
+              style={{ marginTop: '12px' }}
+              disabled={loading || thresholdOptLoading || tickers.length === 0}
+              onClick={runThresholdOptimization}
+            >
+              {thresholdOptLoading ? 'Running…' : 'RUN OPTIMIZATION'}
+            </button>
+            <p className="optimizer__hint" style={{ marginTop: '8px' }}>
+              Runs {THRESHOLD_SWEEP_DEFAULTS.length} backtests — expect 20–40 minutes for SP50.
+            </p>
+            {thresholdOptLoading && (
+              <p className="backtest__threshold-loading" aria-live="polite">
+                Testing threshold {THRESHOLD_SWEEP_DEFAULTS[thresholdOptProgressIx] ?? THRESHOLD_SWEEP_DEFAULTS[0]}% —{' '}
+                {Math.min(thresholdOptProgressIx + 1, THRESHOLD_SWEEP_DEFAULTS.length)} of{' '}
+                {THRESHOLD_SWEEP_DEFAULTS.length}…
+              </p>
+            )}
+          </div>
         </aside>
 
         <div className="backtest__right">
@@ -1194,7 +1523,109 @@ export default function Backtest() {
                 )}
               </div>
 
+              <div className="backtest__section-heading">EXPORT DATA</div>
+              <div className="backtest__export-row">
+                <button type="button" className="backtest__export-btn" onClick={exportEquityCsv}>
+                  Equity Curves CSV
+                </button>
+                <button type="button" className="backtest__export-btn" onClick={exportSummaryCsv}>
+                  Performance Summary CSV
+                </button>
+                <button type="button" className="backtest__export-btn" onClick={exportShrinkageCsv}>
+                  Shrinkage Series CSV
+                </button>
+                <button type="button" className="backtest__export-btn" onClick={exportRegimeCsv}>
+                  Regime Performance CSV
+                </button>
+                <button type="button" className="backtest__export-btn" onClick={exportAllZip}>
+                  Export All (ZIP)
+                </button>
+              </div>
+
               <p className="page-byline">machAlpha backtest · regime overlays and threshold triggers</p>
+            </>
+          )}
+
+          {thresholdOptError && (
+            <div className="optimizer__error backtest__threshold-error">{thresholdOptError}</div>
+          )}
+
+          {thresholdOptResult && (
+            <>
+              <div className="backtest__section-heading">THRESHOLD OPTIMIZATION</div>
+              <div className="backtest__plot-wrap backtest__plot-wrap--threshold">
+                {!Plot || typeof Plot !== 'function' ? (
+                  <div className="backtest__plot-loading" style={loadingStyle}>
+                    Loading chart…
+                  </div>
+                ) : (
+                  <Plot
+                    data={thresholdOptChartConfig.data}
+                    layout={thresholdOptChartConfig.layout}
+                    config={{ displayModeBar: false, responsive: true }}
+                    style={{ width: '100%', height: '100%' }}
+                    useResizeHandler
+                  />
+                )}
+              </div>
+              <div className="backtest__threshold-table-wrap">
+                <table className="backtest__threshold-table">
+                  <thead>
+                    <tr>
+                      <th>Threshold %</th>
+                      <th>Train Sharpe</th>
+                      <th>Val Sharpe</th>
+                      <th>Train DD</th>
+                      <th>Val DD</th>
+                      <th>Rebalances</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {thresholdOptResult.results.map((row) => {
+                      const isOpt =
+                        row.threshold != null &&
+                        thresholdOptResult.optimal_threshold != null &&
+                        Math.abs(Number(row.threshold) - Number(thresholdOptResult.optimal_threshold)) <
+                          1e-6
+                      return (
+                        <tr
+                          key={row.threshold}
+                          className={isOpt ? 'backtest__threshold-row--optimal' : undefined}
+                        >
+                          <td>{row.threshold != null ? String(row.threshold) : '—'}</td>
+                          <td>{formatSharpe(numOrNull(row.train_sharpe))}</td>
+                          <td>{formatSharpe(numOrNull(row.val_sharpe))}</td>
+                          <td className="backtest__cell--dd">
+                            {formatPctDecimal(numOrNull(row.train_drawdown))}
+                          </td>
+                          <td className="backtest__cell--dd">
+                            {formatPctDecimal(numOrNull(row.val_drawdown))}
+                          </td>
+                          <td>
+                            {row.n_rebalances != null ? String(Math.round(row.n_rebalances)) : '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {(() => {
+                const opt = thresholdOptResult.optimal_threshold
+                const optRow = thresholdOptResult.results.find(
+                  (r) =>
+                    r.threshold != null &&
+                    opt != null &&
+                    Math.abs(Number(r.threshold) - Number(opt)) < 1e-6,
+                )
+                const vSh = numOrNull(optRow?.val_sharpe)
+                return (
+                  <div className="backtest__threshold-callout">
+                    Optimal threshold: {opt != null ? `${opt}%` : '—'} · Validation Sharpe:{' '}
+                    {vSh != null ? vSh.toFixed(3) : '—'} · Recommended for SP50 universe
+                  </div>
+                )
+              })()}
             </>
           )}
         </div>

@@ -62,6 +62,16 @@ body {
   width: 100%;
 }
 
+.page.page--forecast {
+  max-width: none;
+  width: 100%;
+}
+
+.page.page--guide {
+  max-width: none;
+  width: 100%;
+}
+
 .page-masthead {
   border-bottom: 2px solid var(--text-primary);
   margin-bottom: 20px;

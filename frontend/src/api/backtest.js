@@ -31,3 +31,8 @@ export function runBacktest(params) {
 export function getRegimes() {
   return api.get('/backtest/regimes')
 }
+
+/** @param {Record<string, unknown>} params */
+export function optimizeThreshold(params) {
+  return api.post('/backtest/optimize-threshold', params)
+}

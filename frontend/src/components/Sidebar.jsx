@@ -4,8 +4,11 @@ import './Sidebar.css'
 const links = [
   { to: '/', label: 'Optimizer' },
   { to: '/factors', label: 'Factors' },
-  { to: '/risk', label: 'Risk' },
   { to: '/signals', label: 'Signals' },
+  { to: '/risk', label: 'Risk' },
+  { to: '/backtest', label: 'Backtest' },
+  { to: '/forecast', label: 'Forecast' },
+  { to: '/guide', label: 'Guide' },
 ]
 
 export default function Sidebar() {
@@ -28,14 +31,6 @@ export default function Sidebar() {
             {label}
           </NavLink>
         ))}
-        <NavLink
-          to="/backtest"
-          className={({ isActive }) =>
-            `sidebar__link${isActive ? ' sidebar__link--active' : ''}`
-          }
-        >
-          Backtest
-        </NavLink>
       </nav>
       <div className="sidebar__footer">
         <span className="sidebar__version">v0.1.0</span>

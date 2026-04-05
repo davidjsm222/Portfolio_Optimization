@@ -7,6 +7,8 @@ import Optimizer from './pages/Optimizer.jsx'
 import Factors from './pages/Factors.jsx'
 import Risk from './pages/Risk.jsx'
 import Signals from './pages/Signals.jsx'
+import Forecast from './pages/Forecast.jsx'
+import Guide from './pages/Guide.jsx'
 
 function Layout() {
   return (
@@ -28,6 +30,8 @@ export default function App() {
         <Route path="/risk" element={<Risk />} />
         <Route path="/signals" element={<Signals />} />
         <Route path="/backtest" element={<Backtest />} />
+        <Route path="/forecast" element={<Forecast />} />
+        <Route path="/guide" element={<Guide />} />
       </Route>
     </Routes>
   )

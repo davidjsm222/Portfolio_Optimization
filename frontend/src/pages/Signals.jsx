@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bar,
   BarChart,
@@ -12,7 +12,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { generateSignals } from '../api/signals.js'
+import { buildSignalsStreamUrl } from '../api/signals.js'
+import EngineStreamLoading from '../components/EngineStreamLoading.jsx'
 import {
   CHART_AXIS_STROKE,
   CHART_GRID,
@@ -24,27 +25,14 @@ import {
   CHART_TOOLTIP_STYLE,
   REF_LINE_STROKE,
 } from '../chartTheme.js'
+import { SP100_TICKERS, SP50_TICKERS } from '../data/universeTickers.js'
+import '../pageUniverse.css'
 import './Signals.css'
 
 const DEFAULT_TICKERS = ['AAPL', 'MSFT', 'GOOGL', 'JPM', 'JNJ']
 
-function formatApiError(error) {
-  const detail = error.response?.data?.detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) =>
-        typeof item === 'object' && item?.msg != null ? String(item.msg) : String(item),
-      )
-      .join('; ')
-  }
-  if (detail != null && typeof detail === 'object') {
-    return JSON.stringify(detail)
-  }
-  return error.message || 'Request failed'
-}
-
 export default function Signals() {
+  const [universeMode, setUniverseMode] = useState('Custom')
   const [tickers, setTickers] = useState(() => [...DEFAULT_TICKERS])
   const [tickerInput, setTickerInput] = useState('')
   const [startDate, setStartDate] = useState('2020-01-01')
@@ -55,8 +43,28 @@ export default function Signals() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+  const [streamStep, setStreamStep] = useState('')
+  const [streamPct, setStreamPct] = useState(0)
+  const [streamElapsed, setStreamElapsed] = useState(0)
+  const streamDoneRef = useRef(false)
+
+  useEffect(() => {
+    if (!loading) return undefined
+    const id = setInterval(() => setStreamElapsed((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [loading])
+
+  const onUniverseChange = useCallback((e) => {
+    const v = e.target.value
+    setUniverseMode(v)
+    if (v === 'SP50') setTickers([...SP50_TICKERS])
+    else if (v === 'SP100') setTickers([...SP100_TICKERS])
+    else setTickers([...DEFAULT_TICKERS])
+    setTickerInput('')
+  }, [])
 
   const flushTickerInput = useCallback(() => {
+    if (universeMode !== 'Custom') return
     const raw = tickerInput.trim()
     if (!raw) return
     const parts = raw.split(/[,\s;]+/).map((p) => p.trim().toUpperCase()).filter(Boolean)
@@ -68,11 +76,12 @@ export default function Signals() {
       return next
     })
     setTickerInput('')
-  }, [tickerInput])
+  }, [tickerInput, universeMode])
 
   const removeTicker = useCallback((t) => {
+    if (universeMode !== 'Custom') return
     setTickers((prev) => prev.filter((x) => x !== t))
-  }, [])
+  }, [universeMode])
 
   const signalScoresData = useMemo(() => {
     if (!result) return []
@@ -108,26 +117,64 @@ export default function Signals() {
     )
   }, [result, tickers])
 
-  const handleRun = async () => {
+  const handleRun = () => {
     setError(null)
     setLoading(true)
+    setResult(null)
+    streamDoneRef.current = false
+    setStreamElapsed(0)
+    setStreamStep('Connecting…')
+    setStreamPct(0)
     const momLb = Math.max(1, parseInt(String(momentumLookback), 10) || 252)
     const revLb = Math.max(1, parseInt(String(reversionLookback), 10) || 5)
-    try {
-      const { data } = await generateSignals({
-        tickers,
-        start: startDate,
-        end: endDate,
-        signal_weight: signalWeight,
-        momentum_lookback: momLb,
-        reversion_lookback: revLb,
-      })
-      setResult(data)
-    } catch (err) {
-      setResult(null)
-      setError(formatApiError(err))
-    } finally {
+    const url = buildSignalsStreamUrl({
+      tickers,
+      start: startDate,
+      end: endDate,
+      signal_weight: signalWeight,
+      momentum_lookback: momLb,
+      reversion_lookback: revLb,
+    })
+    const es = new EventSource(url)
+
+    es.onmessage = (ev) => {
+      let msg
+      try {
+        msg = JSON.parse(ev.data)
+      } catch {
+        es.close()
+        streamDoneRef.current = true
+        setError('Invalid stream data from server')
+        setLoading(false)
+        return
+      }
+      if (msg.type === 'progress') {
+        const pct = Number(msg.pct)
+        const step = typeof msg.step === 'string' ? msg.step : ''
+        setStreamPct(Number.isFinite(pct) ? pct : 0)
+        setStreamStep(step ? `${step}…` : '')
+      } else if (msg.type === 'complete') {
+        streamDoneRef.current = true
+        es.close()
+        setResult(msg.result ?? null)
+        setLoading(false)
+        setStreamStep('')
+      } else if (msg.type === 'error') {
+        streamDoneRef.current = true
+        es.close()
+        setResult(null)
+        setError(typeof msg.message === 'string' ? msg.message : 'Signal generation failed')
+        setLoading(false)
+        setStreamStep('')
+      }
+    }
+
+    es.onerror = () => {
+      es.close()
+      if (streamDoneRef.current) return
+      streamDoneRef.current = true
       setLoading(false)
+      setError('Stream connection error')
     }
   }
 
@@ -140,38 +187,57 @@ export default function Signals() {
         <aside className="signals__left">
           <div className="signals__section">
             <div className="signals__label">Universe</div>
-            <div className="signals__chip-row">
-              {tickers.map((t) => (
-                <span key={t} className="signals__chip">
-                  {t}
-                  <button
-                    type="button"
-                    className="signals__chip-remove"
-                    aria-label={`Remove ${t}`}
-                    onClick={() => removeTicker(t)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-            <input
-              className="signals__input"
-              type="text"
-              placeholder="Ticker, Enter or comma to add"
-              value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  flushTickerInput()
-                }
-                if (e.key === ',') {
-                  e.preventDefault()
-                  flushTickerInput()
-                }
-              }}
-            />
+            <select
+              className="page-universe-select"
+              value={universeMode}
+              onChange={onUniverseChange}
+              aria-label="Universe preset"
+            >
+              <option value="SP50">SP50</option>
+              <option value="SP100">SP100</option>
+              <option value="Custom">Custom</option>
+            </select>
+            {universeMode === 'Custom' ? (
+              <>
+                <div className="signals__chip-row">
+                  {tickers.map((t) => (
+                    <span key={t} className="signals__chip">
+                      {t}
+                      <button
+                        type="button"
+                        className="signals__chip-remove"
+                        aria-label={`Remove ${t}`}
+                        onClick={() => removeTicker(t)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <input
+                  className="signals__input"
+                  type="text"
+                  placeholder="Ticker, Enter or comma to add"
+                  value={tickerInput}
+                  onChange={(e) => setTickerInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      flushTickerInput()
+                    }
+                    if (e.key === ',') {
+                      e.preventDefault()
+                      flushTickerInput()
+                    }
+                  }}
+                />
+              </>
+            ) : (
+              <div className="page-universe-pill" aria-live="polite">
+                {universeMode} ·{' '}
+                {universeMode === 'SP50' ? SP50_TICKERS.length : SP100_TICKERS.length} tickers
+              </div>
+            )}
           </div>
 
           <div className="signals__section">
@@ -245,8 +311,17 @@ export default function Signals() {
           {error ? <div className="signals__error">{error}</div> : null}
         </aside>
 
-        {result ? (
+        {loading || result ? (
           <section className="signals__right">
+            {loading ? (
+              <EngineStreamLoading
+                title="Signals"
+                stepText={streamStep}
+                elapsedSec={streamElapsed}
+                primaryPct={streamPct}
+              />
+            ) : (
+              <>
             <div className="signals__card">
               <div className="signals__block-title">Signal scores</div>
               <div className="signals__chart-wrap">
@@ -425,6 +500,8 @@ export default function Signals() {
                 </table>
               </div>
             </div>
+              </>
+            )}
           </section>
         ) : null}
       </div>

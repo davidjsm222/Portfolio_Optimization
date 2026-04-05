@@ -1,0 +1,148 @@
+.guide {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 40px;
+  width: 100%;
+  color: #f0ece4;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.guide__section-heading {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-bottom: 16px;
+  margin-top: 2.5rem;
+}
+
+.guide__section-heading:first-of-type {
+  margin-top: 0;
+}
+
+.guide__p {
+  margin-bottom: 1.25rem;
+}
+
+.guide__p:last-child {
+  margin-bottom: 0;
+}
+
+.guide__table-wrap {
+  overflow-x: auto;
+  margin: 1rem 0 1.5rem;
+}
+
+.guide__table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #2a2a2a;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.guide__table th,
+.guide__table td {
+  border: 1px solid #2a2a2a;
+  padding: 12px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.guide__table thead th {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  background: #080808;
+}
+
+.guide__table tbody tr:nth-child(odd) {
+  background: #080808;
+}
+
+.guide__table tbody tr:nth-child(even) {
+  background: #0d0d0d;
+}
+
+.guide__mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.guide__serif {
+  font-family: var(--font-serif);
+}
+
+.guide__method-block {
+  margin-bottom: 1.75rem;
+}
+
+.guide__method-block:last-of-type {
+  margin-bottom: 0;
+}
+
+.guide__method-title {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 700;
+  color: #f0ece4;
+  margin-bottom: 0.5rem;
+}
+
+.guide__method-def {
+  margin-bottom: 0.35rem;
+}
+
+.guide__method-when {
+  font-family: var(--font-serif);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.guide__masthead {
+  border-bottom: 2px solid var(--text-primary);
+  margin-bottom: 28px;
+  padding-bottom: 12px;
+}
+
+.guide__masthead-title {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.guide__masthead-dateline {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.guide__footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+}
+
+.guide code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(240, 236, 228, 0.06);
+  padding: 2px 6px;
+}

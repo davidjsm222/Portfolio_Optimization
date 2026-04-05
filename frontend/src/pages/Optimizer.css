@@ -212,6 +212,51 @@
   background: transparent;
 }
 
+.optimizer__warn-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  font-family: var(--font-serif);
+  color: var(--text-primary);
+  background: rgba(232, 160, 32, 0.12);
+  border: 1px solid var(--amber);
+  border-radius: 0;
+}
+
+.optimizer__warn-banner-link {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--amber);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.optimizer__warn-banner-link:hover {
+  color: var(--text-primary);
+}
+
+.optimizer__results-note {
+  margin: 12px 0 1.25rem;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.optimizer__results-note-link {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.optimizer__results-note-link:hover {
+  color: var(--text-primary);
+}
+
 .optimizer__spinner {
   width: 18px;
   height: 18px;
@@ -229,10 +274,10 @@
 
 .optimizer__stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 1px;
   background: var(--border);
-  margin-bottom: 1.25rem;
+  margin-bottom: 0;
 }
 
 .optimizer__stat-card {
@@ -256,6 +301,16 @@
   font-size: 24px;
   font-weight: 500;
   line-height: 1.15;
+}
+
+.optimizer__stat-sublabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: none;
 }
 
 .optimizer__block-title {
@@ -331,4 +386,26 @@
 .optimizer__heatmap th:first-child {
   z-index: 3;
   background: var(--bg-surface);
+}
+
+.optimizer__frontier-csv-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  margin-top: 12px;
+  padding: 8px 20px;
+  border: 1px solid #fff;
+  border-radius: 0;
+  background: #000;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.optimizer__frontier-csv-btn:hover {
+  color: #fff;
+}
+
+.optimizer__frontier-csv-btn:focus-visible {
+  outline: 1px solid #fff;
+  outline-offset: 2px;
 }

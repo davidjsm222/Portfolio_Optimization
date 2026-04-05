@@ -1,0 +1,37 @@
+/* Shared universe dropdown + preset pill for Optimizer, Factors, Risk, Signals */
+
+.page-universe-select {
+  width: 100%;
+  background: #000;
+  border: 1px solid #fff;
+  border-radius: 0;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.page-universe-pill {
+  margin-top: 0;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  background: transparent;
+  letter-spacing: 0.02em;
+}
+
+.page-universe-weights-note {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  margin-top: 4px;
+}

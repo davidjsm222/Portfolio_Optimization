@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from backend.api.routes import backtest, factors, optimize, risk, signals
+from backend.api.routes import backtest, factors, forecast, optimize, risk, signals
 
 APP_VERSION = "0.1.0"
 
@@ -23,6 +23,7 @@ app.include_router(factors.router, prefix="/api")
 app.include_router(risk.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
+app.include_router(forecast.router, prefix="/api")
 
 
 @app.get("/health")

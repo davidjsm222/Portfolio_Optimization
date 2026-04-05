@@ -88,7 +88,9 @@ def _cvxpy_ok(problem: cp.Problem, w_var: cp.Variable) -> bool:
 
 
 def _solve_min_variance_weights(
-    Sigma: np.ndarray, allow_short: bool
+    Sigma: np.ndarray,
+    allow_short: bool,
+    max_weight: float = 1.0,
 ) -> np.ndarray | None:
     n = Sigma.shape[0]
     w = cp.Variable(n)
@@ -96,6 +98,11 @@ def _solve_min_variance_weights(
     cons: list = [cp.sum(w) == 1]
     if not allow_short:
         cons.append(w >= 0)
+    mw = float(max_weight)
+    if mw < 1.0 - 1e-12:
+        cons.append(w <= mw)
+        if allow_short:
+            cons.append(w >= -mw)
     prob = cp.Problem(obj, cons)
     try:
         prob.solve(solver=cp.OSQP)
@@ -112,13 +119,16 @@ def _solve_min_variance_weights(
 
 
 def min_variance(
-    mu: pd.Series, cov: pd.DataFrame, allow_short: bool = False
+    mu: pd.Series,
+    cov: pd.DataFrame,
+    allow_short: bool = False,
+    max_weight: float = 1.0,
 ) -> dict | None:
     """Minimum variance portfolio; Sharpe uses rf=0."""
     mu_arr, labels = _align_mu(mu, cov)
     Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     try:
-        w = _solve_min_variance_weights(Sigma, allow_short)
+        w = _solve_min_variance_weights(Sigma, allow_short, max_weight=max_weight)
     except Exception as e:
         _warn_failure("min_variance", e)
         return None
@@ -132,6 +142,7 @@ def max_sharpe(
     cov: pd.DataFrame,
     rf: float = 0.0,
     allow_short: bool = False,
+    max_weight: float = 1.0,
 ) -> dict | None:
     """Maximize Sharpe via minimizing its negative (scipy SLSQP)."""
     mu_arr, labels = _align_mu(mu, cov)
@@ -147,10 +158,17 @@ def max_sharpe(
             return -(ex / den)
 
     x0 = np.full(n, 1.0 / n)
+    mw = float(max_weight)
     if not allow_short:
-        bounds = [(0.0, 1.0)] * n
+        if mw < 1.0 - 1e-12:
+            bounds = [(0.0, mw)] * n
+        else:
+            bounds = [(0.0, 1.0)] * n
     else:
-        bounds = [(None, None)] * n
+        if mw < 1.0 - 1e-12:
+            bounds = [(-mw, mw)] * n
+        else:
+            bounds = [(None, None)] * n
     cons = ({"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)},)
 
     try:
@@ -181,13 +199,14 @@ def efficient_frontier(
     n_points: int = 50,
     allow_short: bool = False,
     min_target_return: float | None = None,
+    max_weight: float = 1.0,
 ) -> pd.DataFrame:
     """Minimum variance at each target expected return; skip infeasible targets."""
     mu_arr, labels = _align_mu(mu, cov)
     Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     n = len(mu_arr)
 
-    w_mv = _solve_min_variance_weights(Sigma, allow_short)
+    w_mv = _solve_min_variance_weights(Sigma, allow_short, max_weight=max_weight)
     if w_mv is None:
         return pd.DataFrame()
 
@@ -202,6 +221,7 @@ def efficient_frontier(
     targets = np.linspace(lo, r_max, n_points)
 
     rows: list[dict] = []
+    mw = float(max_weight)
     for target_return in targets:
         w = cp.Variable(n)
         obj = cp.Minimize(cp.quad_form(w, Sigma))
@@ -211,6 +231,10 @@ def efficient_frontier(
         ]
         if not allow_short:
             cons.append(w >= 0)
+        if mw < 1.0 - 1e-12:
+            cons.append(w <= mw)
+            if allow_short:
+                cons.append(w >= -mw)
         prob = cp.Problem(obj, cons)
         try:
             prob.solve(solver=cp.OSQP)
@@ -260,15 +284,19 @@ def _risk_parity_objective(w: np.ndarray, Sigma: np.ndarray) -> float:
 def risk_parity(
     cov: pd.DataFrame,
     mu: pd.Series | None = None,
+    max_weight: float = 1.0,
 ) -> dict | None:
     """Equal risk contributions; optional mu for return and Sharpe (rf=0)."""
     labels = list(cov.columns)
     Sigma = _prepare_sigma(cov.to_numpy(dtype=float))
     n = Sigma.shape[0]
+    mw = float(max_weight)
+    ub = min(1.0, mw) if mw < 1.0 - 1e-12 else 1.0
+    ub = max(ub, 0.02)
     x0 = np.full(n, 1.0 / n)
-    x0 = np.clip(x0, 0.01, 1.0)
+    x0 = np.clip(x0, 0.01, ub)
     x0 = x0 / x0.sum()
-    bounds = [(0.01, 1.0)] * n
+    bounds = [(0.01, ub)] * n
     cons = ({"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)},)
 
     try:

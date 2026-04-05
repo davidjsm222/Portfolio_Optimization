@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bar,
   BarChart,
@@ -9,7 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { analyzeRisk } from '../api/risk.js'
+import { buildRiskStreamUrl } from '../api/risk.js'
+import EngineStreamLoading from '../components/EngineStreamLoading.jsx'
 import RollingRiskChart from '../components/RollingRiskChart.jsx'
 import {
   CHART_AXIS_STROKE,
@@ -18,6 +19,8 @@ import {
   CHART_TICK,
   CHART_TOOLTIP_STYLE,
 } from '../chartTheme.js'
+import { SP100_TICKERS, SP50_TICKERS } from '../data/universeTickers.js'
+import '../pageUniverse.css'
 import './Risk.css'
 
 const DEFAULT_TICKERS = ['AAPL', 'MSFT', 'GOOGL', 'JPM', 'JNJ']
@@ -27,22 +30,6 @@ function equalWeights(tickerList) {
   if (n === 0) return {}
   const w = 1 / n
   return Object.fromEntries(tickerList.map((t) => [t, w]))
-}
-
-function formatApiError(error) {
-  const detail = error.response?.data?.detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    return detail
-      .map((item) =>
-        typeof item === 'object' && item?.msg != null ? String(item.msg) : String(item),
-      )
-      .join('; ')
-  }
-  if (detail != null && typeof detail === 'object') {
-    return JSON.stringify(detail)
-  }
-  return error.message || 'Request failed'
 }
 
 function buildRiskInterpretation(r) {
@@ -82,6 +69,7 @@ function buildRiskInterpretation(r) {
 }
 
 export default function Risk() {
+  const [universeMode, setUniverseMode] = useState('Custom')
   const [tickers, setTickers] = useState(() => [...DEFAULT_TICKERS])
   const [tickerInput, setTickerInput] = useState('')
   const [startDate, setStartDate] = useState('2020-01-01')
@@ -93,8 +81,35 @@ export default function Risk() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+  const [streamStep, setStreamStep] = useState('')
+  const [streamPct, setStreamPct] = useState(0)
+  const [streamElapsed, setStreamElapsed] = useState(0)
+  const streamDoneRef = useRef(false)
+
+  useEffect(() => {
+    if (!loading) return undefined
+    const id = setInterval(() => setStreamElapsed((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [loading])
+
+  const onUniverseChange = useCallback((e) => {
+    const v = e.target.value
+    setUniverseMode(v)
+    if (v === 'SP50') {
+      setTickers([...SP50_TICKERS])
+      setWeights(equalWeights(SP50_TICKERS))
+    } else if (v === 'SP100') {
+      setTickers([...SP100_TICKERS])
+      setWeights(equalWeights(SP100_TICKERS))
+    } else {
+      setTickers([...DEFAULT_TICKERS])
+      setWeights(equalWeights(DEFAULT_TICKERS))
+    }
+    setTickerInput('')
+  }, [])
 
   const flushTickerInput = useCallback(() => {
+    if (universeMode !== 'Custom') return
     const raw = tickerInput.trim()
     if (!raw) return
     const parts = raw.split(/[,\s;]+/).map((p) => p.trim().toUpperCase()).filter(Boolean)
@@ -109,9 +124,10 @@ export default function Risk() {
       return next
     })
     setTickerInput('')
-  }, [tickerInput])
+  }, [tickerInput, universeMode])
 
   const removeTicker = useCallback((t) => {
+    if (universeMode !== 'Custom') return
     setTickers((prev) => {
       const next = prev.filter((x) => x !== t)
       if (next.length !== prev.length) {
@@ -119,7 +135,7 @@ export default function Risk() {
       }
       return next
     })
-  }, [])
+  }, [universeMode])
 
   const setWeightFor = useCallback((t, raw) => {
     const v = raw === '' ? 0 : Number(raw)
@@ -130,7 +146,8 @@ export default function Risk() {
     () => tickers.reduce((s, t) => s + (Number(weights[t]) || 0), 0),
     [tickers, weights],
   )
-  const weightsMismatch = Math.abs(weightSum - 1) > 0.02
+  const weightsMismatch =
+    universeMode === 'Custom' && Math.abs(weightSum - 1) > 0.02
 
   const interpretation = useMemo(
     () => (result ? buildRiskInterpretation(result) : ''),
@@ -152,33 +169,72 @@ export default function Risk() {
     result.cvar_optimized_weights &&
     Object.keys(result.cvar_optimized_weights).length > 0
 
-  const handleRun = async () => {
+  const handleRun = () => {
     setError(null)
     setLoading(true)
-    const numericWeights = Object.fromEntries(
-      tickers.map((t) => [t, Number(weights[t]) || 0]),
-    )
+    setResult(null)
+    streamDoneRef.current = false
+    setStreamElapsed(0)
+    setStreamStep('Connecting…')
+    setStreamPct(0)
+    const numericWeights =
+      universeMode === 'Custom'
+        ? Object.fromEntries(tickers.map((t) => [t, Number(weights[t]) || 0]))
+        : equalWeights(tickers)
     let target = null
     if (runCvarOptimize && targetReturn.trim() !== '') {
       const tr = Number(targetReturn)
       if (Number.isFinite(tr)) target = tr
     }
-    try {
-      const { data } = await analyzeRisk({
-        tickers,
-        start: startDate,
-        end: endDate,
-        weights: numericWeights,
-        confidence,
-        run_cvar_optimize: runCvarOptimize,
-        target_return: target,
-      })
-      setResult(data)
-    } catch (err) {
-      setResult(null)
-      setError(formatApiError(err))
-    } finally {
+    const url = buildRiskStreamUrl({
+      tickers,
+      start: startDate,
+      end: endDate,
+      weights: numericWeights,
+      confidence,
+      run_cvar_optimize: runCvarOptimize,
+      target_return: target,
+    })
+    const es = new EventSource(url)
+
+    es.onmessage = (ev) => {
+      let msg
+      try {
+        msg = JSON.parse(ev.data)
+      } catch {
+        es.close()
+        streamDoneRef.current = true
+        setError('Invalid stream data from server')
+        setLoading(false)
+        return
+      }
+      if (msg.type === 'progress') {
+        const pct = Number(msg.pct)
+        const step = typeof msg.step === 'string' ? msg.step : ''
+        setStreamPct(Number.isFinite(pct) ? pct : 0)
+        setStreamStep(step ? `${step}…` : '')
+      } else if (msg.type === 'complete') {
+        streamDoneRef.current = true
+        es.close()
+        setResult(msg.result ?? null)
+        setLoading(false)
+        setStreamStep('')
+      } else if (msg.type === 'error') {
+        streamDoneRef.current = true
+        es.close()
+        setResult(null)
+        setError(typeof msg.message === 'string' ? msg.message : 'Risk analysis failed')
+        setLoading(false)
+        setStreamStep('')
+      }
+    }
+
+    es.onerror = () => {
+      es.close()
+      if (streamDoneRef.current) return
+      streamDoneRef.current = true
       setLoading(false)
+      setError('Stream connection error')
     }
   }
 
@@ -194,38 +250,57 @@ export default function Risk() {
         <aside className="risk__left">
           <div className="risk__section">
             <div className="risk__label">Universe</div>
-            <div className="risk__chip-row">
-              {tickers.map((t) => (
-                <span key={t} className="risk__chip">
-                  {t}
-                  <button
-                    type="button"
-                    className="risk__chip-remove"
-                    aria-label={`Remove ${t}`}
-                    onClick={() => removeTicker(t)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-            <input
-              className="risk__input"
-              type="text"
-              placeholder="Ticker, Enter or comma to add"
-              value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  flushTickerInput()
-                }
-                if (e.key === ',') {
-                  e.preventDefault()
-                  flushTickerInput()
-                }
-              }}
-            />
+            <select
+              className="page-universe-select"
+              value={universeMode}
+              onChange={onUniverseChange}
+              aria-label="Universe preset"
+            >
+              <option value="SP50">SP50</option>
+              <option value="SP100">SP100</option>
+              <option value="Custom">Custom</option>
+            </select>
+            {universeMode === 'Custom' ? (
+              <>
+                <div className="risk__chip-row">
+                  {tickers.map((t) => (
+                    <span key={t} className="risk__chip">
+                      {t}
+                      <button
+                        type="button"
+                        className="risk__chip-remove"
+                        aria-label={`Remove ${t}`}
+                        onClick={() => removeTicker(t)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <input
+                  className="risk__input"
+                  type="text"
+                  placeholder="Ticker, Enter or comma to add"
+                  value={tickerInput}
+                  onChange={(e) => setTickerInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      flushTickerInput()
+                    }
+                    if (e.key === ',') {
+                      e.preventDefault()
+                      flushTickerInput()
+                    }
+                  }}
+                />
+              </>
+            ) : (
+              <div className="page-universe-pill" aria-live="polite">
+                {universeMode} ·{' '}
+                {universeMode === 'SP50' ? SP50_TICKERS.length : SP100_TICKERS.length} tickers
+              </div>
+            )}
           </div>
 
           <div className="risk__section">
@@ -250,22 +325,28 @@ export default function Risk() {
 
           <div className="risk__section">
             <div className="risk__label">Weights</div>
-            <div className="risk__weights-grid">
-              {tickers.map((t) => (
-                <div key={t} className="risk__weight-field">
-                  <label htmlFor={`risk-w-${t}`}>{t}</label>
-                  <input
-                    id={`risk-w-${t}`}
-                    className="risk__weight-input"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={weights[t] ?? 0}
-                    onChange={(e) => setWeightFor(t, e.target.value)}
-                  />
-                </div>
-              ))}
-            </div>
+            {universeMode === 'Custom' ? (
+              <div className="risk__weights-grid">
+                {tickers.map((t) => (
+                  <div key={t} className="risk__weight-field">
+                    <label htmlFor={`risk-w-${t}`}>{t}</label>
+                    <input
+                      id={`risk-w-${t}`}
+                      className="risk__weight-input"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={weights[t] ?? 0}
+                      onChange={(e) => setWeightFor(t, e.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="page-universe-weights-note">
+                Equal weights applied · 1/N per ticker
+              </p>
+            )}
             {weightsMismatch ? (
               <p className="risk__weight-warning">
                 Weights should sum to 1.0 (currently {weightSum.toFixed(3)}).
@@ -325,8 +406,17 @@ export default function Risk() {
           {error ? <div className="risk__error">{error}</div> : null}
         </aside>
 
-        {result ? (
+        {loading || result ? (
           <section className="risk__right">
+            {loading ? (
+              <EngineStreamLoading
+                title="Risk analysis"
+                stepText={streamStep}
+                elapsedSec={streamElapsed}
+                primaryPct={streamPct}
+              />
+            ) : (
+              <>
             <div className="risk__stats-grid">
               <div className="risk__stat-card">
                 <div className="risk__stat-name">VaR</div>
@@ -487,6 +577,8 @@ export default function Risk() {
               <div className="risk__block-title">Risk interpretation</div>
               <p className="risk__interpret">{interpretation}</p>
             </div>
+              </>
+            )}
           </section>
         ) : null}
       </div>

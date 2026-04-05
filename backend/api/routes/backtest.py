@@ -9,11 +9,13 @@ import queue
 import threading
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.data.cache import get_returns
 from backend.engine.backtest import (
     _monthly_last_trading_days,
     backtest_summary,
@@ -97,6 +99,42 @@ class BacktestRequest(BaseModel):
     drift_threshold: float = 0.05
     signal_blend: bool = True
     starting_capital: float = Field(default=100_000, gt=0)
+
+
+class ThresholdOptRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    tickers: list[str]
+    start: str
+    end: str
+    train_end: str = "2019-12-31"
+    estimation_window: int = 252
+    signal_blend: bool = True
+    starting_capital: float = Field(default=100_000, gt=0)
+    thresholds: list[float] = Field(
+        default_factory=lambda: [
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            5.0,
+        ],
+    )
+    optimize_for: Literal["sharpe", "calmar", "max_drawdown"] = "sharpe"
+
+
+class ThresholdOptResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    results: list[dict[str, Any]]
+    optimal_threshold: float
+    optimal_method: str
+    train_period: dict[str, str]
+    val_period: dict[str, str]
 
 
 class BacktestResponse(BaseModel):
@@ -345,6 +383,170 @@ def run_backtest_api(body: BacktestRequest) -> BacktestResponse:
         estimation_window=body.estimation_window,
     )
     return BacktestResponse.model_validate(data)
+
+
+def _validation_start_iso(train_end: str) -> str:
+    """First business day strictly after ``train_end`` (YYYY-MM-DD)."""
+    nxt = pd.Timestamp(train_end) + pd.offsets.BDay(1)
+    return nxt.date().isoformat()
+
+
+def _max_sharpe_val_score(val_df: pd.DataFrame, optimize_for: str) -> float:
+    if "max_sharpe" not in val_df.index:
+        return float("-inf")
+    row = val_df.loc["max_sharpe"]
+    if optimize_for == "sharpe":
+        v = row["sharpe"]
+    elif optimize_for == "calmar":
+        v = row["calmar"]
+    else:
+        v = row["max_drawdown"]
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return float("-inf")
+    if fv != fv or np.isinf(fv):  # NaN or inf
+        return float("-inf")
+    return fv
+
+
+def _best_method_on_val(val_df: pd.DataFrame, optimize_for: str) -> str:
+    if val_df.empty:
+        return "max_sharpe"
+    if optimize_for == "sharpe":
+        col = "sharpe"
+    elif optimize_for == "calmar":
+        col = "calmar"
+    else:
+        col = "max_drawdown"
+    s = val_df[col].replace([np.inf, -np.inf], np.nan)
+    if s.notna().any():
+        return str(s.idxmax())
+    return "max_sharpe"
+
+
+def _summary_row_metrics(df: pd.DataFrame, method: str) -> dict[str, Any]:
+    if method not in df.index:
+        return {
+            "sharpe": None,
+            "max_drawdown": None,
+            "calmar": None,
+            "n_rebalances": None,
+        }
+    row = df.loc[method]
+    return {
+        "sharpe": _json_float(row["sharpe"]),
+        "max_drawdown": _json_float(row["max_drawdown"]),
+        "calmar": _json_float(row["calmar"]),
+        "n_rebalances": int(row["n_rebalances"]),
+    }
+
+
+@router.post("/optimize-threshold", response_model=ThresholdOptResponse)
+def optimize_threshold_api(body: ThresholdOptRequest) -> ThresholdOptResponse:
+    try:
+        tickers = [str(t).strip().upper() for t in body.tickers if str(t).strip()]
+        if not tickers:
+            raise HTTPException(status_code=422, detail="tickers must list at least one symbol")
+
+        ts_start = pd.Timestamp(body.start)
+        ts_train_end = pd.Timestamp(body.train_end)
+        ts_end = pd.Timestamp(body.end)
+        if not (ts_start < ts_train_end <= ts_end):
+            raise HTTPException(
+                status_code=422,
+                detail="require start < train_end <= end",
+            )
+
+        val_start = _validation_start_iso(body.train_end)
+        if pd.Timestamp(val_start) > ts_end:
+            raise HTTPException(
+                status_code=422,
+                detail="validation window empty: train_end too close to end",
+            )
+
+        thresholds = list(body.thresholds)
+        if not thresholds:
+            raise HTTPException(status_code=422, detail="thresholds must not be empty")
+
+        full_ret = get_returns(tickers, body.start, body.end).sort_index()
+        ts_val_start = pd.Timestamp(val_start)
+        train_ret = full_ret.loc[
+            (full_ret.index >= ts_start) & (full_ret.index <= ts_train_end)
+        ].copy()
+        val_ret = full_ret.loc[
+            (full_ret.index >= ts_val_start) & (full_ret.index <= ts_end)
+        ].copy()
+
+        results: list[dict[str, Any]] = []
+        val_summaries: dict[float, pd.DataFrame] = {}
+        best_t: float | None = None
+        best_score = float("-inf")
+
+        for t in thresholds:
+            print(f"Testing threshold {t}%...", flush=True)
+            drift = float(t) / 100.0
+            train_bt = run_backtest(
+                tickers=tickers,
+                start=body.start,
+                end=body.train_end,
+                estimation_window=body.estimation_window,
+                rebalance_freq="threshold",
+                drift_threshold=drift,
+                signal_blend=body.signal_blend,
+                returns=train_ret,
+            )
+            val_bt = run_backtest(
+                tickers=tickers,
+                start=val_start,
+                end=body.end,
+                estimation_window=body.estimation_window,
+                rebalance_freq="threshold",
+                drift_threshold=drift,
+                signal_blend=body.signal_blend,
+                returns=val_ret,
+            )
+            train_df = backtest_summary(train_bt)
+            val_df = backtest_summary(val_bt)
+            val_summaries[float(t)] = val_df
+
+            tr = _summary_row_metrics(train_df, "max_sharpe")
+            va = _summary_row_metrics(val_df, "max_sharpe")
+            results.append(
+                {
+                    "threshold": float(t),
+                    "train_sharpe": tr["sharpe"],
+                    "train_drawdown": tr["max_drawdown"],
+                    "train_calmar": tr["calmar"],
+                    "val_sharpe": va["sharpe"],
+                    "val_drawdown": va["max_drawdown"],
+                    "val_calmar": va["calmar"],
+                    "n_rebalances": va["n_rebalances"],
+                }
+            )
+
+            sc = _max_sharpe_val_score(val_df, body.optimize_for)
+            if sc > best_score:
+                best_score = sc
+                best_t = float(t)
+
+        if best_t is None:
+            best_t = float(thresholds[0])
+
+        optimal_val_df = val_summaries.get(best_t, next(iter(val_summaries.values())))
+        optimal_method = _best_method_on_val(optimal_val_df, body.optimize_for)
+
+        return ThresholdOptResponse(
+            results=results,
+            optimal_threshold=best_t,
+            optimal_method=optimal_method,
+            train_period={"start": body.start, "end": body.train_end},
+            val_period={"start": val_start, "end": body.end},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/stream")

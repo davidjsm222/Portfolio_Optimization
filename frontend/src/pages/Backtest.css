@@ -353,3 +353,132 @@
   background: transparent;
   letter-spacing: 0.02em;
 }
+
+.backtest__export-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.backtest__export-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 8px 20px;
+  border: 1px solid #fff;
+  border-radius: 0;
+  background: #000;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.backtest__export-btn:hover {
+  color: #fff;
+}
+
+.backtest__export-btn:focus-visible {
+  outline: 1px solid #fff;
+  outline-offset: 2px;
+}
+
+.backtest__threshold-controls {
+  margin-top: 0.5rem;
+}
+
+.backtest__threshold-train-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backtest__threshold-mini-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.backtest__threshold-opt-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.backtest__threshold-opt-grid .optimizer__method-btn {
+  flex: 1;
+  min-width: 72px;
+}
+
+.backtest__threshold-loading {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--amber);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.backtest__threshold-error {
+  margin-top: 1rem;
+}
+
+.backtest__plot-wrap--threshold {
+  height: 280px;
+}
+
+.backtest__threshold-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  margin-top: 12px;
+}
+
+.backtest__threshold-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.backtest__threshold-table th,
+.backtest__threshold-table td {
+  padding: 8px 10px;
+  text-align: right;
+  border: 1px solid var(--border-dim);
+}
+
+.backtest__threshold-table th {
+  text-align: left;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+}
+
+.backtest__threshold-table td:first-child,
+.backtest__threshold-table th:first-child {
+  text-align: left;
+}
+
+.backtest__threshold-row--optimal {
+  font-weight: 700;
+  color: var(--green);
+}
+
+.backtest__threshold-row--optimal td {
+  color: var(--green);
+}
+
+.backtest__threshold-callout {
+  margin-top: 14px;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  border: 1px solid var(--green);
+  background: rgba(76, 175, 125, 0.08);
+  letter-spacing: 0.02em;
+}

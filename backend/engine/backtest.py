@@ -135,9 +135,12 @@ def run_backtest(
     signal_blend: bool = True,
     n_jobs: int = 1,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    returns: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """
     Rolling estimation window, periodic rebalancing, four optimizers + equal weight.
+
+    If ``returns`` is provided, it must cover ``start``..``end`` and ``get_returns`` is skipped.
 
     Returns dict with keys: returns, raw_returns, weights, shrinkage,
     rebalance_dates, metadata.
@@ -146,13 +149,19 @@ def run_backtest(
         warnings.warn("backtest: n_jobs > 1 not supported yet; running sequentially", stacklevel=2)
 
     tickers = [str(t).strip().upper() for t in tickers]
-    returns = get_returns(tickers, start, end).sort_index()
-    if returns.empty:
+    if returns is None:
+        asset_rets = get_returns(tickers, start, end).sort_index()
+    else:
+        asset_rets = returns.copy()
+        asset_rets.sort_index(inplace=True)
+        cols = [c for c in tickers if c in asset_rets.columns]
+        asset_rets = asset_rets[cols]
+    if asset_rets.empty or asset_rets.shape[1] == 0:
         raise ValueError("no returns data for backtest")
 
-    monthly = _monthly_last_trading_days(returns.index)
+    monthly = _monthly_last_trading_days(asset_rets.index)
     min_obs = 126
-    monthly_ok = [m for m in monthly if len(returns.loc[returns.index < m]) >= min_obs]
+    monthly_ok = [m for m in monthly if len(asset_rets.loc[asset_rets.index < m]) >= min_obs]
     if not monthly_ok:
         raise ValueError("insufficient history for any rebalance date")
 
@@ -168,16 +177,16 @@ def run_backtest(
         m_cap = monthly_ok[mi]
         if last_rebal is None:
             rebal_dates.append(m_cap)
-            hist = returns.loc[returns.index < m_cap].tail(estimation_window)
+            hist = asset_rets.loc[asset_rets.index < m_cap].tail(estimation_window)
             if len(hist) < min_obs:
                 mi += 1
                 continue
             lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
             alpha_t = float(lw_fit.shrinkage_)
             cov = ledoit_wolf_covariance(hist)
-            mu = annualize_returns(hist).reindex(returns.columns).fillna(0.0)
+            mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
             w_place = _optimize_all(
-                mu, cov, hist, list(returns.columns), signal_blend, alpha_t
+                mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
             )
             last_rebal = m_cap
             mi += 1
@@ -187,7 +196,7 @@ def run_backtest(
             t_exec = m_cap
         else:
             t_extra = _first_drift_rebalance(
-                returns, last_rebal, m_cap, w_place, drift_threshold
+                asset_rets, last_rebal, m_cap, w_place, drift_threshold
             )
             t_exec = (
                 t_extra
@@ -200,14 +209,14 @@ def run_backtest(
             continue
 
         rebal_dates.append(t_exec)
-        hist = returns.loc[returns.index < t_exec].tail(estimation_window)
+        hist = asset_rets.loc[asset_rets.index < t_exec].tail(estimation_window)
         if len(hist) >= min_obs:
             lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
             alpha_t = float(lw_fit.shrinkage_)
             cov = ledoit_wolf_covariance(hist)
-            mu = annualize_returns(hist).reindex(returns.columns).fillna(0.0)
+            mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
             w_place = _optimize_all(
-                mu, cov, hist, list(returns.columns), signal_blend, alpha_t
+                mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
             )
         last_rebal = t_exec
         if t_exec >= m_cap:
@@ -227,7 +236,7 @@ def run_backtest(
 
     n_rebalances = len(rebal_dates)
     for i, t in enumerate(rebal_dates):
-        hist = returns.loc[returns.index < t].tail(estimation_window)
+        hist = asset_rets.loc[asset_rets.index < t].tail(estimation_window)
         if len(hist) < min_obs:
             print(f"skip rebal {t.date()}: only {len(hist)} obs")
             continue
@@ -235,14 +244,14 @@ def run_backtest(
         lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
         alpha_t = float(lw_fit.shrinkage_)
         cov = ledoit_wolf_covariance(hist)
-        mu = annualize_returns(hist).reindex(returns.columns).fillna(0.0)
+        mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
 
         print(
             f"Rebalancing {i + 1}/{len(rebal_dates)}  date={t.date()}  alpha={alpha_t:.3f}"
         )
 
         w_dict = _optimize_all(
-            mu, cov, hist, list(returns.columns), signal_blend, alpha_t
+            mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
         )
         shrinkage_vals.append(alpha_t)
         for m in METHODS:
@@ -267,9 +276,9 @@ def run_backtest(
         rows = weight_store[m]
         idx = [r[0] for r in rows]
         mat = pd.DataFrame(
-            [r[1].reindex(returns.columns).fillna(0.0).values for r in rows],
+            [r[1].reindex(asset_rets.columns).fillna(0.0).values for r in rows],
             index=idx,
-            columns=list(returns.columns),
+            columns=list(asset_rets.columns),
         )
         weights_out[m] = mat
 
@@ -278,10 +287,10 @@ def run_backtest(
     ]
     shrink_ser = pd.Series(shrinkage_vals, index=rebal_ts)
 
-    eq_w = _equal_weights(list(returns.columns))
+    eq_w = _equal_weights(list(asset_rets.columns))
 
     out_returns = pd.DataFrame(
-        index=returns.index,
+        index=asset_rets.index,
         columns=list(METHODS) + ["equal_weight"],
         dtype=float,
     )
@@ -289,10 +298,10 @@ def run_backtest(
     for ri, t_r in enumerate(rebal_ts):
         t_next = rebal_ts[ri + 1] if ri + 1 < len(rebal_ts) else None
         if t_next is not None:
-            mask = (returns.index >= t_r) & (returns.index < t_next)
+            mask = (asset_rets.index >= t_r) & (asset_rets.index < t_next)
         else:
-            mask = returns.index >= t_r
-        slice_r = returns.loc[mask]
+            mask = asset_rets.index >= t_r
+        slice_r = asset_rets.loc[mask]
         if slice_r.empty:
             continue
         for meth in METHODS:
@@ -311,7 +320,7 @@ def run_backtest(
 
     return {
         "returns": out_returns.astype(float),
-        "raw_returns": returns.astype(float),
+        "raw_returns": asset_rets.astype(float),
         "weights": weights_out,
         "shrinkage": shrink_ser,
         "rebalance_dates": [pd.Timestamp(x) for x in rebal_ts],
