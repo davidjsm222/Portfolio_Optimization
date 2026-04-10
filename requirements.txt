@@ -3,3 +3,4 @@ statsmodels
 ecos
 fastapi
 uvicorn
+etf-scraper

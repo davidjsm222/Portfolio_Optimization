@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.covariance import LedoitWolf
 
 from backend.data.cache import get_returns
+from backend.data.fetcher import fetch_returns
 from backend.engine.optimizer import max_sharpe, min_variance, risk_parity
 from backend.engine.returns import annualize_returns, ledoit_wolf_covariance
 from backend.engine.risk import calm_max_drawdown, cvar_optimize, max_drawdown
@@ -126,7 +127,7 @@ def _optimize_all(
 
 
 def run_backtest(
-    tickers: list[str],
+    tickers: list[str] | None,
     start: str,
     end: str,
     estimation_window: int = 252,
@@ -136,11 +137,17 @@ def run_backtest(
     n_jobs: int = 1,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     returns: pd.DataFrame | None = None,
+    use_point_in_time: bool = False,
+    pit_universe_type: str = "SP50",
 ) -> dict[str, Any]:
     """
     Rolling estimation window, periodic rebalancing, four optimizers + equal weight.
 
-    If ``returns`` is provided, it must cover ``start``..``end`` and ``get_returns`` is skipped.
+    If ``returns`` is provided, it must cover ``start``..``end`` and no fetch is done.
+
+    When ``use_point_in_time`` is True, ``tickers`` may be None; the universe comes from
+    ``backend.data.pit_universe`` (membership history + cap ranks). Returns are fetched via
+    ``fetch_returns`` (no SQLite cache) when ``returns`` is None.
 
     Returns dict with keys: returns, raw_returns, weights, shrinkage,
     rebalance_dates, metadata.
@@ -148,14 +155,63 @@ def run_backtest(
     if n_jobs != 1:
         warnings.warn("backtest: n_jobs > 1 not supported yet; running sequentially", stacklevel=2)
 
-    tickers = [str(t).strip().upper() for t in tickers]
-    if returns is None:
-        asset_rets = get_returns(tickers, start, end).sort_index()
+    pit_u = str(pit_universe_type).strip().upper()
+    if pit_u not in ("SP50", "SP100", "SP500"):
+        raise ValueError("pit_universe_type must be SP50, SP100, or SP500")
+
+    pit_union_n = 0
+    pit_rebalance_fallback = 50 if pit_u == "SP50" else (100 if pit_u == "SP100" else 500)
+
+    if use_point_in_time:
+        from backend.data.pit_universe import collect_pit_ticker_union, get_pit_universe
+
+        union_list = collect_pit_ticker_union(start, end, universe=pit_u)
+        pit_union_n = len(union_list)
+        if returns is None:
+            print(
+                f"[backtest] PIT ({pit_u}): fetching returns without cache ({pit_union_n} tickers)",
+                flush=True,
+            )
+            asset_rets = fetch_returns(union_list, start, end).sort_index()
+        else:
+            asset_rets = returns.copy()
+            asset_rets.sort_index(inplace=True)
+            cols = [c for c in union_list if c in asset_rets.columns]
+            asset_rets = asset_rets[cols]
+        meta_tickers = sorted(asset_rets.columns.tolist())
+
+        def cols_at(rebal_date: pd.Timestamp) -> list[str]:
+            pit_syms = get_pit_universe(
+                rebal_date.date().isoformat(),
+                universe=pit_u,
+                max_n=500,
+            )
+            pit_cols = [t for t in pit_syms if t in asset_rets.columns]
+            n = len(pit_cols)
+            print(
+                f"[backtest] {rebal_date.date()}: {n} PIT tickers ({pit_u})",
+                flush=True,
+            )
+            if n < 5:
+                pit_cols = list(asset_rets.columns)[: min(pit_rebalance_fallback, len(asset_rets.columns))]
+            return pit_cols
+
     else:
-        asset_rets = returns.copy()
-        asset_rets.sort_index(inplace=True)
-        cols = [c for c in tickers if c in asset_rets.columns]
-        asset_rets = asset_rets[cols]
+        if not tickers:
+            raise ValueError("tickers required when use_point_in_time is False")
+        tickers = [str(t).strip().upper() for t in tickers]
+        meta_tickers = list(tickers)
+        if returns is None:
+            asset_rets = get_returns(tickers, start, end).sort_index()
+        else:
+            asset_rets = returns.copy()
+            asset_rets.sort_index(inplace=True)
+            cols = [c for c in tickers if c in asset_rets.columns]
+            asset_rets = asset_rets[cols]
+
+        def cols_at(_rebal_date: pd.Timestamp) -> list[str]:
+            return list(asset_rets.columns)
+
     if asset_rets.empty or asset_rets.shape[1] == 0:
         raise ValueError("no returns data for backtest")
 
@@ -177,17 +233,16 @@ def run_backtest(
         m_cap = monthly_ok[mi]
         if last_rebal is None:
             rebal_dates.append(m_cap)
-            hist = asset_rets.loc[asset_rets.index < m_cap].tail(estimation_window)
+            tc = cols_at(m_cap)
+            hist = asset_rets.loc[asset_rets.index < m_cap].tail(estimation_window)[tc]
             if len(hist) < min_obs:
                 mi += 1
                 continue
             lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
             alpha_t = float(lw_fit.shrinkage_)
             cov = ledoit_wolf_covariance(hist)
-            mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
-            w_place = _optimize_all(
-                mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
-            )
+            mu = annualize_returns(hist).reindex(tc).fillna(0.0)
+            w_place = _optimize_all(mu, cov, hist, tc, signal_blend, alpha_t)
             last_rebal = m_cap
             mi += 1
             continue
@@ -209,15 +264,14 @@ def run_backtest(
             continue
 
         rebal_dates.append(t_exec)
-        hist = asset_rets.loc[asset_rets.index < t_exec].tail(estimation_window)
+        tc = cols_at(t_exec)
+        hist = asset_rets.loc[asset_rets.index < t_exec].tail(estimation_window)[tc]
         if len(hist) >= min_obs:
             lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
             alpha_t = float(lw_fit.shrinkage_)
             cov = ledoit_wolf_covariance(hist)
-            mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
-            w_place = _optimize_all(
-                mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
-            )
+            mu = annualize_returns(hist).reindex(tc).fillna(0.0)
+            w_place = _optimize_all(mu, cov, hist, tc, signal_blend, alpha_t)
         last_rebal = t_exec
         if t_exec >= m_cap:
             mi += 1
@@ -233,29 +287,53 @@ def run_backtest(
 
     shrinkage_vals: list[float] = []
     weight_store: dict[str, list[tuple[pd.Timestamp, pd.Series]]] = {m: [] for m in METHODS}
+    pit_universe_changes: list[dict[str, Any]] = []
+    prev_pit_tc: set[str] | None = None
 
     n_rebalances = len(rebal_dates)
     for i, t in enumerate(rebal_dates):
-        hist = asset_rets.loc[asset_rets.index < t].tail(estimation_window)
+        tc = cols_at(t)
+        hist = asset_rets.loc[asset_rets.index < t].tail(estimation_window)[tc]
         if len(hist) < min_obs:
             print(f"skip rebal {t.date()}: only {len(hist)} obs")
             continue
 
+        tc_set = set(tc)
+        if use_point_in_time:
+            if prev_pit_tc is None:
+                pit_universe_changes.append(
+                    {
+                        "date": str(t.date()),
+                        "n_tickers": len(tc),
+                        "joined": sorted(tc_set),
+                        "left": [],
+                    }
+                )
+            else:
+                pit_universe_changes.append(
+                    {
+                        "date": str(t.date()),
+                        "n_tickers": len(tc),
+                        "joined": sorted(tc_set - prev_pit_tc),
+                        "left": sorted(prev_pit_tc - tc_set),
+                    }
+                )
+            prev_pit_tc = tc_set
+
         lw_fit = LedoitWolf().fit(hist.to_numpy(dtype=float))
         alpha_t = float(lw_fit.shrinkage_)
         cov = ledoit_wolf_covariance(hist)
-        mu = annualize_returns(hist).reindex(asset_rets.columns).fillna(0.0)
+        mu = annualize_returns(hist).reindex(tc).fillna(0.0)
 
         print(
             f"Rebalancing {i + 1}/{len(rebal_dates)}  date={t.date()}  alpha={alpha_t:.3f}"
         )
 
-        w_dict = _optimize_all(
-            mu, cov, hist, list(asset_rets.columns), signal_blend, alpha_t
-        )
+        w_dict = _optimize_all(mu, cov, hist, tc, signal_blend, alpha_t)
         shrinkage_vals.append(alpha_t)
         for m in METHODS:
-            weight_store[m].append((t, w_dict[m].copy()))
+            w_full = w_dict[m].reindex(asset_rets.columns).fillna(0.0)
+            weight_store[m].append((t, w_full))
 
         if progress_callback is not None and n_rebalances > 0:
             progress_callback(
@@ -309,14 +387,21 @@ def run_backtest(
             out_returns.loc[slice_r.index, meth] = (slice_r * w).sum(axis=1)
         out_returns.loc[slice_r.index, "equal_weight"] = (slice_r * eq_w).sum(axis=1)
 
-    metadata = {
-        "tickers": tickers,
+    metadata: dict[str, Any] = {
+        "tickers": meta_tickers,
         "start": start,
         "end": end,
         "estimation_window": estimation_window,
         "rebalance_freq": rebalance_freq,
         "n_rebalances": len(rebal_ts),
+        "use_point_in_time": use_point_in_time,
+        "pit_universe_type": pit_u if use_point_in_time else None,
     }
+    if use_point_in_time:
+        metadata["pit_union_n"] = pit_union_n
+        metadata["pit_universe_changes"] = pit_universe_changes
+    else:
+        metadata["pit_universe_changes"] = None
 
     return {
         "returns": out_returns.astype(float),

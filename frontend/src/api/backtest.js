@@ -11,9 +11,13 @@ export function buildBacktestStreamUrl(params) {
     drift_threshold,
     signal_blend,
     starting_capital,
+    use_point_in_time,
+    pit_universe_type,
   } = params
   const u = new URL('/api/backtest/stream', window.location.origin)
-  u.searchParams.set('tickers', tickers.join(','))
+  if (!use_point_in_time) {
+    u.searchParams.set('tickers', tickers.join(','))
+  }
   u.searchParams.set('start', start)
   u.searchParams.set('end', end)
   u.searchParams.set('estimation_window', String(estimation_window))
@@ -21,6 +25,10 @@ export function buildBacktestStreamUrl(params) {
   u.searchParams.set('drift_threshold', String(drift_threshold))
   u.searchParams.set('signal_blend', String(signal_blend))
   u.searchParams.set('starting_capital', String(starting_capital))
+  u.searchParams.set('use_point_in_time', String(Boolean(use_point_in_time)))
+  if (use_point_in_time && pit_universe_type) {
+    u.searchParams.set('pit_universe_type', String(pit_universe_type))
+  }
   return u.toString()
 }
 

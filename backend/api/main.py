@@ -1,5 +1,7 @@
 """Portfolio Optimizer FastAPI application."""
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -7,6 +9,9 @@ import uvicorn
 from backend.api.routes import backtest, factors, forecast, optimize, risk, signals
 
 APP_VERSION = "0.1.0"
+
+# Only watch application code so reload does not scan venv/site-packages (noisy, can crash mid-install).
+_BACKEND_SRC = Path(__file__).resolve().parent.parent
 
 app = FastAPI(title="Portfolio Optimizer API", version=APP_VERSION)
 
@@ -53,4 +58,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
+        reload_dirs=[str(_BACKEND_SRC)],
     )

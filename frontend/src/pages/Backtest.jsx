@@ -259,6 +259,8 @@ export default function Backtest() {
   const [rebalanceMode, setRebalanceMode] = useState('monthly')
   const [driftThresholdPercent, setDriftThresholdPercent] = useState(0.5)
   const [signalBlend, setSignalBlend] = useState(true)
+  const [usePointInTime, setUsePointInTime] = useState(false)
+  const [pitUniverseType, setPitUniverseType] = useState('SP50')
   const [startingCapital, setStartingCapital] = useState(100000)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -382,6 +384,10 @@ export default function Backtest() {
   }, [loading, streamProgress, elapsedSec])
 
   const handleRun = () => {
+    if (!usePointInTime && !tickers.length) {
+      setError('Add at least one ticker (switch to Custom or pick a preset universe).')
+      return
+    }
     setError(null)
     setLoading(true)
     setResult(null)
@@ -401,6 +407,8 @@ export default function Backtest() {
         rebalanceMode === 'threshold' ? driftThresholdPercent / 100 : 0.05,
       signal_blend: signalBlend,
       starting_capital: startingCapital,
+      use_point_in_time: usePointInTime,
+      pit_universe_type: pitUniverseType,
     }
 
     const url = buildBacktestStreamUrl(payload)
@@ -460,6 +468,48 @@ export default function Backtest() {
       })
     }
   }
+
+  const pitUniverseChanges = useMemo(() => {
+    if (!result?.metadata?.use_point_in_time) return []
+    const raw = result.metadata.pit_universe_changes
+    if (!Array.isArray(raw)) return []
+    return raw.map((row) => ({
+      date: String(row.date ?? ''),
+      nTickers: Number(row.n_tickers) || 0,
+      joined: Array.isArray(row.joined) ? row.joined.map(String) : [],
+      left: Array.isArray(row.left) ? row.left.map(String) : [],
+    }))
+  }, [result])
+
+  /** Flatten PIT steps: total union size, baseline count, per-ticker add/remove dates */
+  const pitMembershipHistory = useMemo(() => {
+    if (!pitUniverseChanges.length) return null
+    const unionN = Number(result?.metadata?.pit_union_n)
+    const universeLabel = result?.metadata?.pit_universe_type
+      ? String(result.metadata.pit_universe_type)
+      : 'PIT'
+    const [first, ...later] = pitUniverseChanges
+    const additions = []
+    later.forEach((row) => {
+      row.joined.forEach((ticker) => additions.push({ date: row.date, ticker }))
+    })
+    const removals = []
+    pitUniverseChanges.forEach((row) => {
+      row.left.forEach((ticker) => removals.push({ date: row.date, ticker }))
+    })
+    const byDateTicker = (a, b) =>
+      a.date.localeCompare(b.date) || a.ticker.localeCompare(b.ticker)
+    additions.sort(byDateTicker)
+    removals.sort(byDateTicker)
+    return {
+      unionN: Number.isFinite(unionN) ? unionN : null,
+      universeLabel,
+      baselineDate: first.date,
+      baselineCount: first.nTickers,
+      additions,
+      removals,
+    }
+  }, [pitUniverseChanges, result])
 
   const summaryRows = useMemo(() => {
     if (!result?.summary || !Array.isArray(result.summary)) return []
@@ -1075,6 +1125,33 @@ export default function Backtest() {
           </div>
 
           <div className="optimizer__section">
+            <div className="optimizer__label">Point-in-time universe</div>
+            <label className="backtest__checkbox-row">
+              <input
+                type="checkbox"
+                checked={usePointInTime}
+                onChange={(e) => setUsePointInTime(e.target.checked)}
+              />
+              Use S&P 500 membership history at each rebalance (fja05680). SP50/SP100 use current
+              market-cap ranks as a proxy (see research docs).
+            </label>
+            {usePointInTime ? (
+              <div className="optimizer__method-grid" style={{ marginTop: '10px' }}>
+                {['SP50', 'SP100', 'SP500'].map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    className={`optimizer__method-btn${pitUniverseType === u ? ' optimizer__method-btn--active' : ''}`}
+                    onClick={() => setPitUniverseType(u)}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="optimizer__section">
             <div className="optimizer__label">Date range</div>
             <div className="optimizer__date-row">
               <input
@@ -1177,7 +1254,7 @@ export default function Backtest() {
           <button
             type="button"
             className="optimizer__run"
-            disabled={loading || tickers.length === 0}
+            disabled={loading || (!usePointInTime && tickers.length === 0)}
             onClick={handleRun}
           >
             {loading ? 'Running…' : 'RUN BACKTEST'}
@@ -1299,6 +1376,76 @@ export default function Backtest() {
               </p>
             )}
           </div>
+
+          {pitMembershipHistory ? (
+            <div className="optimizer__section backtest__membership-section">
+              <div className="optimizer__label">Membership history</div>
+              <p className="optimizer__hint backtest__membership-hint">
+                Point-in-time {pitMembershipHistory.universeLabel} — unique symbols in the returns panel and
+                membership changes between rebalances.
+              </p>
+              <ul className="backtest__membership-stats">
+                <li>
+                  <span className="backtest__membership-k">Total tickers (period)</span>
+                  <span className="backtest__membership-v">
+                    {pitMembershipHistory.unionN != null ? pitMembershipHistory.unionN : '—'}
+                  </span>
+                </li>
+                <li>
+                  <span className="backtest__membership-k">Starting universe</span>
+                  <span className="backtest__membership-v">
+                    {pitMembershipHistory.baselineCount} on {pitMembershipHistory.baselineDate}
+                  </span>
+                </li>
+              </ul>
+              {pitMembershipHistory.additions.length > 0 ? (
+                <>
+                  <div className="backtest__membership-subhead">Added</div>
+                  <div className="backtest__membership-table-wrap">
+                    <table className="backtest__membership-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Ticker</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pitMembershipHistory.additions.map((r) => (
+                          <tr key={`${r.date}-${r.ticker}`}>
+                            <td>{r.date}</td>
+                            <td>{r.ticker}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : null}
+              {pitMembershipHistory.removals.length > 0 ? (
+                <>
+                  <div className="backtest__membership-subhead">Removed</div>
+                  <div className="backtest__membership-table-wrap">
+                    <table className="backtest__membership-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Ticker</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pitMembershipHistory.removals.map((r) => (
+                          <tr key={`${r.date}-${r.ticker}-rm`}>
+                            <td>{r.date}</td>
+                            <td>{r.ticker}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : null}
         </aside>
 
         <div className="backtest__right">

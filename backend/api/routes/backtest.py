@@ -7,13 +7,13 @@ import json
 import math
 import queue
 import threading
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.data.cache import get_returns
 from backend.engine.backtest import (
@@ -24,6 +24,7 @@ from backend.engine.backtest import (
 )
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
+
 
 BACKTEST_REGIMES: dict[str, tuple[str, str]] = {
     ".com bubble burst": ("2000-03-10", "2002-10-09"),
@@ -91,7 +92,7 @@ REGIME_DEFINITIONS: list[dict[str, str]] = [
 class BacktestRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    tickers: list[str]
+    tickers: Optional[list[str]] = None
     start: str
     end: str
     estimation_window: int = 252
@@ -99,6 +100,17 @@ class BacktestRequest(BaseModel):
     drift_threshold: float = 0.05
     signal_blend: bool = True
     starting_capital: float = Field(default=100_000, gt=0)
+    use_point_in_time: bool = False
+    pit_universe_type: Literal["SP50", "SP100", "SP500"] = "SP50"
+
+    @model_validator(mode="after")
+    def _require_tickers_when_no_pit(self) -> BacktestRequest:
+        if not self.use_point_in_time:
+            if not self.tickers:
+                raise ValueError(
+                    "tickers required when not using point-in-time universe",
+                )
+        return self
 
 
 class ThresholdOptRequest(BaseModel):
@@ -363,13 +375,15 @@ def _serialize_result(
 def run_backtest_api(body: BacktestRequest) -> BacktestResponse:
     try:
         result = run_backtest(
-            tickers=body.tickers,
+            tickers=None if body.use_point_in_time else body.tickers,
             start=body.start,
             end=body.end,
             estimation_window=body.estimation_window,
             rebalance_freq=body.rebalance_freq,
             drift_threshold=body.drift_threshold,
             signal_blend=body.signal_blend,
+            use_point_in_time=body.use_point_in_time,
+            pit_universe_type=body.pit_universe_type,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -551,7 +565,10 @@ def optimize_threshold_api(body: ThresholdOptRequest) -> ThresholdOptResponse:
 
 @router.get("/stream")
 async def stream_backtest(
-    tickers: str = Query(..., description="Comma-separated ticker symbols"),
+    tickers: Optional[str] = Query(
+        default=None,
+        description="Comma-separated symbols; omit when use_point_in_time=true.",
+    ),
     start: str = Query(...),
     end: str = Query(...),
     estimation_window: int = Query(252, ge=1),
@@ -559,10 +576,25 @@ async def stream_backtest(
     drift_threshold: float = Query(0.05),
     signal_blend: bool = Query(True),
     starting_capital: float = Query(100_000, gt=0),
+    use_point_in_time: bool = Query(False),
+    pit_universe_type: Literal["SP50", "SP100", "SP500"] = Query("SP50"),
 ) -> StreamingResponse:
-    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-    if not ticker_list:
-        raise HTTPException(status_code=400, detail="tickers must list at least one symbol")
+    ticker_list: list[str] | None
+    if use_point_in_time:
+        ticker_list = None
+    else:
+        tq = (tickers or "").strip()
+        if not tq:
+            raise HTTPException(
+                status_code=422,
+                detail="tickers required when not using point-in-time universe",
+            )
+        ticker_list = [t.strip().upper() for t in tq.split(",") if t.strip()]
+        if not ticker_list:
+            raise HTTPException(
+                status_code=422,
+                detail="tickers must list at least one symbol",
+            )
 
     q: queue.Queue[tuple[str, Any]] = queue.Queue()
 
@@ -576,6 +608,8 @@ async def stream_backtest(
                 rebalance_freq=rebalance_freq,
                 drift_threshold=drift_threshold,
                 signal_blend=signal_blend,
+                use_point_in_time=use_point_in_time,
+                pit_universe_type=pit_universe_type,
                 progress_callback=lambda d: q.put(("progress", d)),
             )
             q.put(("done", bt_result))
@@ -585,22 +619,30 @@ async def stream_backtest(
     thread = threading.Thread(target=run_in_thread, daemon=True)
     thread.start()
 
+    _WAIT_SLICE_SEC = 30.0
+
     async def event_stream():
+        # First bytes ASAP — helps proxies/browsers during long runs before first progress.
+        yield ": connected\n\n"
         while True:
             try:
 
-                def _pull() -> tuple[str, Any]:
+                def _pull_slice() -> tuple[str, Any] | None:
                     try:
-                        return q.get(timeout=300.0)
+                        return q.get(timeout=_WAIT_SLICE_SEC)
                     except queue.Empty:
-                        return ("timeout", None)
+                        return None
 
-                kind, data = await asyncio.to_thread(_pull)
+                item: tuple[str, Any] | None = None
+                while item is None:
+                    got = await asyncio.to_thread(_pull_slice)
+                    if got is None:
+                        yield ": keepalive\n\n"
+                    else:
+                        item = got
+                kind, data = item
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-                break
-            if kind == "timeout":
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Stream timeout waiting for backtest'})}\n\n"
                 break
             if kind == "progress":
                 line = json.dumps({"type": "progress", **data})
